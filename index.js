@@ -2,8 +2,6 @@ import express from 'express';
 import dotenv from 'dotenv';
 import axios from 'axios';
 import { URL } from 'url';
-import { createProxyMiddleware } from 'express-http-proxy';
-import stream from 'stream';
 
 // Load environment variables
 dotenv.config();
