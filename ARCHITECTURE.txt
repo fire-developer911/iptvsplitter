@@ -1,0 +1,401 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    IPTV PROXY - SYSTEM ARCHITECTURE                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        REQUEST FLOW DIAGRAM                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │  IPTV CLIENT (Smarters Pro, GSE Smart IPTV, etc.)                   │
+    │                                                                      │
+    │  GET /live/user/pass/1.ts?username=alice&password=pwd1             │
+    └───────────────────────────┬──────────────────────────────────────────┘
+                                │
+                                │ HTTPS
+                                ▼
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │              RENDER.COM - IPTV PROXY SERVICE                         │
+    │  ┌────────────────────────────────────────────────────────────────┐ │
+    │  │ Express.js / FastAPI Server (Port $PORT)                      │ │
+    │  ├────────────────────────────────────────────────────────────────┤ │
+    │  │                                                                │ │
+    │  │  1️⃣  AUTHENTICATION LAYER                                    │ │
+    │  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │ │
+    │  │     Extract: username="alice", password="pwd1"               │ │
+    │  │     Lookup in users{} dictionary from .env                  │ │
+    │  │     Check: users["alice"].password == "pwd1" ✓              │ │
+    │  │     Check: NOT EXPIRED(users["alice"].exp) ✓                │ │
+    │  │                                                                │ │
+    │  │  2️⃣  ENVIRONMENT VARIABLES (Loaded at Startup)            │ │
+    │  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │ │
+    │  │     main_url = "http://upstream.com:8080"                    │ │
+    │  │     main_user = "real_username"                              │ │
+    │  │     main_pass = "real_password"                              │ │
+    │  │                                                                │ │
+    │  │     users["alice"] = {password: "pwd1", exp: "1/5/2026"}    │ │
+    │  │     users["bob"]   = {password: "pwd2", exp: "18/6/2026"}   │ │
+    │  │                                                                │ │
+    │  │  3️⃣  CREDENTIAL REWRITING                                  │ │
+    │  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │ │
+    │  │     Replace custom credentials with upstream:                │ │
+    │  │                                                                │ │
+    │  │     FROM: ?username=alice&password=pwd1                       │ │
+    │  │     TO:   ?username=real_username&password=real_password     │ │
+    │  │                                                                │ │
+    │  │  4️⃣  PROXY REQUEST TO UPSTREAM                             │ │
+    │  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │ │
+    │  │     Forward HTTP request to: http://upstream.com:8080/...   │ │
+    │  │     With rewritten credentials                               │ │
+    │  │     Copy response headers (except Host)                      │ │
+    │  │                                                                │ │
+    │  │  5️⃣  STREAM RESPONSE (No Buffering!)                       │ │
+    │  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │ │
+    │  │     Pipe/stream response directly to client                  │ │
+    │  │     As chunks arrive, send to client                         │ │
+    │  │     4GB video = no 4GB memory spike!                         │ │
+    │  │                                                                │ │
+    │  └────────────────────────────────────────────────────────────────┘ │
+    └─────────────────────────────┬──────────────────────────────────────────┘
+                                  │
+                                  │ HTTPS (Response)
+                                  ▼
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │  IPTV CLIENT - Receives video stream                                 │
+    │  (Never sees real credentials: "real_username" / "real_password")   │
+    └──────────────────────────────────────────────────────────────────────┘
+
+
+                                  │ (Proxy makes upstream request)
+                                  │
+                                  │ HTTP
+                                  ▼
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │         YOUR UPSTREAM XTREAM CODES PROVIDER                          │
+    │  ┌────────────────────────────────────────────────────────────────┐ │
+    │  │  Sees: username="real_username", password="real_password"     │ │
+    │  │  Returns: Video stream, playlist, categories, etc.            │ │
+    │  │  Never knows about alice, bob, or client credentials          │ │
+    │  └────────────────────────────────────────────────────────────────┘ │
+    └──────────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   ERROR HANDLING FLOW                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    Missing Credentials?
+    GET /live/...
+    (no ?username= or ?password=)
+                │
+                ▼
+        🔴 401 Unauthorized
+        {"error": "Unauthorized", "message": "Missing username or password"}
+
+
+    Invalid Username?
+    GET /live/...?username=hacker&password=anything
+                │
+                ├─ Lookup "hacker" in users{} → NOT FOUND
+                ▼
+        🔴 401 Unauthorized
+        {"error": "Unauthorized", "message": "Invalid username"}
+
+
+    Wrong Password?
+    GET /live/...?username=alice&password=wrongpass
+                │
+                ├─ Lookup "alice" → FOUND
+                ├─ Check password → MISMATCH
+                ▼
+        🔴 401 Unauthorized
+        {"error": "Unauthorized", "message": "Invalid password"}
+
+
+    Account Expired?
+    GET /live/...?username=bob&password=pwd2
+    (bob's expiration: 18/6/2026, today: 20/6/2026)
+                │
+                ├─ Lookup "bob" → FOUND
+                ├─ Check password → MATCH ✓
+                ├─ Check expiration → EXPIRED ✗
+                ▼
+        🔴 403 Forbidden
+        {"error": "Forbidden", "message": "Account expired"}
+
+
+    Upstream Unreachable?
+    (All auth checks pass, but main_url is down)
+                │
+                ▼
+        🔴 502 Bad Gateway
+        {"error": "Bad Gateway", "message": "Failed to connect to upstream server"}
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   ENVIRONMENT VARIABLE STRUCTURE                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    .env (or Render Environment Variables)
+    ═════════════════════════════════════════════════════════════════════════
+
+    # UPSTREAM (Your Real Credentials - KEEP SECRET!)
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ main_url=http://my-xtream-provider.com:8080                         │
+    │ main_user=my_real_username                                          │
+    │ main_pass=my_real_password                                          │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    # CUSTOM USERS (Share these with clients)
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ user_1_user=alice                                                   │
+    │ user_1_pass=pwd1                                                    │
+    │ user_1_exp=31/12/2025                                               │
+    │                                                                     │
+    │ user_2_user=bob                                                     │
+    │ user_2_pass=pwd2                                                    │
+    │ user_2_exp=18/6/2026                                                │
+    │                                                                     │
+    │ user_3_user=charlie                                                 │
+    │ user_3_pass=pwd3                                                    │
+    │ user_3_exp=1/1/2027                                                 │
+    │                                                                     │
+    │ ... (add as many as you want)                                       │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    At startup:
+    → Parse all user_N_* variables
+    → Build users{} dictionary:
+        users = {
+            "alice": {password: "pwd1", expiration: "31/12/2025"},
+            "bob": {password: "pwd2", expiration: "18/6/2026"},
+            "charlie": {password: "pwd3", expiration: "1/1/2027"}
+        }
+    → Ready to validate requests
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   DEPLOYMENT ARCHITECTURE                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    GitHub Repository
+    ┌──────────────────────────────────┐
+    │ iptv-proxy/                      │
+    │ ├── index.js                     │
+    │ ├── main.py                      │
+    │ ├── package.json                 │
+    │ ├── requirements.txt              │
+    │ ├── .env.example                 │
+    │ ├── .gitignore (← protects .env) │
+    │ └── README.md                    │
+    └────────────┬──────────────────────┘
+                 │
+                 │ git push (CI/CD)
+                 │
+    Render.com
+    ┌──────────────────────────────────┐
+    │  Web Service                     │
+    │  ┌────────────────────────────┐ │
+    │  │ Build:                     │ │
+    │  │ npm install (or pip)       │ │
+    │  └────────────────────────────┘ │
+    │  ┌────────────────────────────┐ │
+    │  │ Environment Variables:     │ │
+    │  │ main_url=...               │ │
+    │  │ main_user=...              │ │
+    │  │ main_pass=...              │ │
+    │  │ user_1_user=...            │ │
+    │  │ user_1_pass=...            │ │
+    │  │ user_1_exp=...             │ │
+    │  └────────────────────────────┘ │
+    │  ┌────────────────────────────┐ │
+    │  │ Start:                     │ │
+    │  │ npm start                  │ │
+    │  │ (or: uvicorn main:app...) │ │
+    │  └────────────────────────────┘ │
+    │  ┌────────────────────────────┐ │
+    │  │ Binds to:                  │ │
+    │  │ 0.0.0.0:$PORT              │ │
+    │  │ (e.g., :3000)              │ │
+    │  └────────────────────────────┘ │
+    │  ┌────────────────────────────┐ │
+    │  │ Public HTTPS URL:          │ │
+    │  │ https://iptv-proxy.onrender.com
+    │  └────────────────────────────┘ │
+    └──────────────────────────────────┘
+                 │
+                 │ HTTPS (Port 443)
+                 │
+         ┌───────▼────────┐
+         │   Internet     │
+         │   (Clients)    │
+         └────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   MEMORY & STREAMING PERFORMANCE                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    WITHOUT Proxy (Direct Upstream)
+    ═════════════════════════════════════════════════════════════════════════
+    
+    Client → [Upstream: 50 Mbps video] → Client
+    
+    Memory usage: ~4GB (if 4GB video file)
+    ⚠️ Problem: Each video streamed = massive memory spike
+
+
+    WITH Proxy (This Service)
+    ═════════════════════════════════════════════════════════════════════════
+    
+    Client → [Proxy streams 8KB chunks] → Upstream
+                    ↓
+                  Read 8KB from upstream
+                  Write 8KB to client
+                  Repeat 500K times
+    
+    Memory usage: ~8KB active (per video)
+    ✅ Solution: Constant low memory, 10+ videos at once
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   USER LIFECYCLE                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    DAY 1 - CREATE USER
+    ───────────────────────────────────────────────────────────────────────
+    
+    Render Environment → Add:
+        user_1_user=alice
+        user_1_pass=pwd123
+        user_1_exp=31/12/2025
+    
+    Click "Save Changes" → Service redeploys
+    
+    Alice can now login: alice / pwd123
+
+
+    DAY 100 - USE
+    ───────────────────────────────────────────────────────────────────────
+    
+    Alice uses proxy:
+        GET /live/...?username=alice&password=pwd123
+        ✓ Validated & forwarded to upstream
+        ✓ Streams video successfully
+
+
+    DAY 200 - DISABLE
+    ───────────────────────────────────────────────────────────────────────
+    
+    Change expiration in Render Environment:
+        user_1_exp=15/6/2025  (past date)
+    
+    Click "Save Changes"
+    
+    Next request from Alice:
+        GET /live/...?username=alice&password=pwd123
+        ✗ Account expired
+        ✗ Returns 403 Forbidden
+
+
+    DAY 250 - ENABLE AGAIN
+    ───────────────────────────────────────────────────────────────────────
+    
+    Update in Render Environment:
+        user_1_exp=31/12/2025
+    
+    Alice can login again immediately (no restart needed!)
+
+
+    DAY 300 - REMOVE
+    ───────────────────────────────────────────────────────────────────────
+    
+    Delete from Render Environment:
+        [Delete user_1_user]
+        [Delete user_1_pass]
+        [Delete user_1_exp]
+    
+    Alice can no longer login
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   SECURITY MODEL                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    What This Protects
+    ═════════════════════════════════════════════════════════════════════════
+    
+    ✅ Your real upstream credentials are NEVER sent to clients
+    ✅ Each client has unique credentials (easy to revoke individual access)
+    ✅ Expired accounts are instantly deactivated (no restart)
+    ✅ Audit trail: All requests logged (with usernames)
+    
+    
+    What You Still Need
+    ═════════════════════════════════════════════════════════════════════════
+    
+    ⚠️  Use HTTPS in production (Render provides free SSL/TLS)
+    ⚠️  Rotate upstream credentials quarterly
+    ⚠️  Never commit .env to GitHub
+    ⚠️  Use strong passwords for client accounts
+    ⚠️  Monitor logs for suspicious activity
+    ⚠️  Disable inactive users
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   TYPICAL USE CASE EXAMPLE                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    Your Xtream Provider's Credentials (SECRET)
+    ───────────────────────────────────────────────────────────────────────
+    URL: http://xtream.provider.com:8080
+    User: mycompany_12345
+    Pass: xk8#$92Ks!9
+
+
+    Your Clients (Share these)
+    ───────────────────────────────────────────────────────────────────────
+    Client 1 (Friend):
+        Username: friend_john
+        Password: simplePW123
+        Expires: 31/12/2025
+    
+    Client 2 (Family):
+        Username: family_access
+        Password: familyPW456
+        Expires: 31/12/2026
+    
+    Client 3 (Reseller):
+        Username: reseller_123
+        Password: resellerPW789
+        Expires: 30/6/2026
+
+
+    When Friend Uses App
+    ───────────────────────────────────────────────────────────────────────
+    
+    1. Friend adds playlist URL to IPTV Smarters Pro:
+       https://my-iptv-proxy.onrender.com/player_api.php?action=get_simple_playlist&username=friend_john&password=simplePW123
+    
+    2. Proxy validates:
+       ✓ friend_john exists
+       ✓ Password "simplePW123" matches
+       ✓ Expiration 31/12/2025 hasn't passed
+    
+    3. Proxy forwards to upstream:
+       http://xtream.provider.com:8080/player_api.php?action=get_simple_playlist&username=mycompany_12345&password=xk8#$92Ks!9
+    
+    4. Upstream sends playlist to proxy
+    
+    5. Proxy forwards playlist to Friend's app
+    
+    6. Friend watches TV
+    
+    ✅ Your real credentials are HIDDEN
+    ✅ Friend cannot see your real username/password
+    ✅ You can revoke Friend's access by changing expiration date
+
+
+═════════════════════════════════════════════════════════════════════════════
+End of Architecture Diagram
+═════════════════════════════════════════════════════════════════════════════
