@@ -97,34 +97,30 @@ function authenticateUser(req, res, next) {
   next();
 }
 
-/**
- * Rewrite URL to replace custom credentials with upstream credentials
- */
-function rewriteUrl(urlString) {
-  try {
-    const url = new URL(urlString, mainUrl);
-    url.searchParams.set('username', mainUser);
-    url.searchParams.set('password', mainPass);
-    return url.toString();
-  } catch (err) {
-    console.error('Error rewriting URL:', err);
-    throw err;
-  }
-}
+
 
 /**
  * Generic proxy handler for all routes
  */
 async function proxyHandler(req, res) {
   try {
-    // Reconstruct the full path with query parameters (excluding auth credentials we'll replace)
-    const pathWithQuery = req.originalUrl;
-
-    // Build the upstream URL
-    const upstreamUrl = mainUrl + pathWithQuery.split('?')[0];
+    // Build upstream URL with all query params
+    const pathOnly = req.originalUrl.split('?')[0];
+    const upstreamUrl = mainUrl + pathOnly;
     
-    // Rewrite credentials
-    const rewrittenUrl = rewriteUrl(upstreamUrl);
+    // Build complete URL with all query parameters
+    const url = new URL(upstreamUrl);
+    
+    // Copy all query parameters from original request
+    Object.keys(req.query).forEach((key) => {
+      url.searchParams.set(key, req.query[key]);
+    });
+    
+    // Rewrite credentials (overwrite username/password)
+    url.searchParams.set('username', mainUser);
+    url.searchParams.set('password', mainPass);
+    
+    const rewrittenUrl = url.toString();
 
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} → ${rewrittenUrl}`);
 
